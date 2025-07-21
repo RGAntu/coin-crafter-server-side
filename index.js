@@ -23,7 +23,33 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
+
+    const db = client.db("coinCrafterDB");
+    const usersCollection = db.collection("users");
+
+    // Endpoint to save user data
+    app.post("/users", async (req, res) => {
+      const newUser = req.body;
+
+      if (!newUser?.email) {
+        return res.status(400).send({ error: "Email is required." });
+      }
+
+      // Check if the user already exists
+      const existingUser = await usersCollection.findOne({
+        email: newUser.email,
+      });
+
+      if (existingUser) {
+        return res.status(409).send({ error: "User already exists." });
+      }
+
+      // Insert the user
+      const result = await usersCollection.insertOne(newUser);
+      res.status(201).send(result);
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
@@ -31,7 +57,7 @@ async function run() {
     );
   } finally {
     // Ensures that the client will close when you finish/error
-    await client.close();
+    // await client.close();
   }
 }
 run().catch(console.dir);
