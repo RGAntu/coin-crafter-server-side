@@ -50,6 +50,24 @@ async function run() {
       res.status(201).send(result);
     });
 
+    //  Route to get user role by email
+    app.get("/users/role", async (req, res) => {
+      const email = req.query.email;
+
+      if (!email) {
+        return res.status(400).send({ error: "Email query is required." });
+      }
+
+      const user = await usersCollection.findOne({ email });
+
+      if (!user) {
+        return res.status(404).send({ error: "User not found." });
+      }
+
+      //  Send only the role (not full user)
+      res.send({ role: user.role || "user" });
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
