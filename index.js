@@ -4,7 +4,14 @@ const app = express();
 const cors = require("cors");
 const port = process.env.PORT || 5000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const admin = require("firebase-admin");
 const { default: Stripe } = require("stripe");
+
+const serviceAccount = require("./coin-crafter-firebase-admin-key.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 
 // Middleware
 app.use(cors());
@@ -36,6 +43,24 @@ async function run() {
     const submissionsCollection = db.collection("submissions");
     const paymentsCollection = db.collection("payments");
 
+    const verifyFBToken = async (req, res, next) => {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).send({ message: "unauthorized access" });
+      }
+
+      const token = authHeader.split(" ")[1];
+
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.decoded = decoded;
+        next();
+      } catch (error) {
+        console.error("Token verification error:", error);
+        return res.status(403).send({ message: "forbidden access" });
+      }
+    };
+
     // Endpoint to save user data
     app.post("/users", async (req, res) => {
       const newUser = req.body;
@@ -61,13 +86,13 @@ async function run() {
     //  Route to get user role by email
     app.get("/users/role", async (req, res) => {
       const email = req.query.email;
-
+      console.log(email);
       if (!email) {
         return res.status(400).send({ error: "Email query is required." });
       }
 
       const user = await usersCollection.findOne({ email });
-
+      console.log(user);
       if (!user) {
         return res.status(404).send({ error: "User not found." });
       }
@@ -93,8 +118,8 @@ async function run() {
 
     // Buyer
 
-    // Get Buyer Stats
-    app.get("/stats", async (req, res) => {
+    // 1. GET Buyer Stats
+    app.get("/buyer/stats", async (req, res) => {
       const buyerEmail = req.query.email;
       if (!buyerEmail) return res.status(400).send({ error: "Email required" });
 
@@ -102,37 +127,156 @@ async function run() {
         buyer_email: buyerEmail,
       });
 
-      const pendingWorkers = await submissionsCollection.countDocuments({
-        buyer_email: buyerEmail,
-        status: "pending",
-      });
-
-      const paidSubmissions = await submissionsCollection
-        .find({ buyer_email: buyerEmail, status: "approved" })
+      const buyerTasks = await tasksCollection
+        .find({ buyer_email: buyerEmail })
         .toArray();
-
-      const totalPaid = paidSubmissions.reduce(
-        (sum, sub) => sum + (sub.payable_amount || 0),
+      const pendingWorkers = buyerTasks.reduce(
+        (acc, task) => acc + (task.required_workers || 0),
         0
       );
 
-      res.send({
-        totalTasks,
-        pendingWorkers,
-        totalPaid,
-      });
+      const paidSubs = await submissionsCollection
+        .find({
+          buyer_email: buyerEmail,
+          status: "approved",
+        })
+        .toArray();
+
+      const totalPaid = paidSubs.reduce(
+        (sum, s) => sum + (s.payable_amount || 0),
+        0
+      );
+
+      res.send({ totalTasks, pendingWorkers, totalPaid });
     });
 
-    //  Get Pending Submissions
-    app.get("/pending-submissions", async (req, res) => {
+    // 2. GET Pending Submissions
+    app.get("/buyer/pending-submissions", async (req, res) => {
       const buyerEmail = req.query.email;
       if (!buyerEmail) return res.status(400).send({ error: "Email required" });
 
-      const submissions = await submissionsCollection
-        .find({ buyer_email: buyerEmail, status: "pending" })
+      const subs = await submissionsCollection
+        .find({
+          buyer_email: buyerEmail,
+          status: "pending",
+        })
         .toArray();
 
-      res.send(submissions);
+      res.send(subs);
+    });
+
+    // 3. PATCH Approve Submission
+    app.patch("/submissions/approve/:id", async (req, res) => {
+      const id = req.params.id;
+      const sub = await submissionsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+      if (!sub) return res.status(404).send({ error: "Not found" });
+
+      await submissionsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: "approved" } }
+      );
+
+      await usersCollection.updateOne(
+        { email: sub.worker_email },
+        { $inc: { coins: sub.payable_amount } }
+      );
+
+      res.send({ success: true });
+    });
+
+    // 4. PATCH Reject Submission
+    app.patch("/submissions/reject/:id", async (req, res) => {
+      const id = req.params.id;
+      const sub = await submissionsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+      if (!sub) return res.status(404).send({ error: "Not found" });
+
+      await submissionsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: "rejected" } }
+      );
+
+      await tasksCollection.updateOne(
+        { _id: new ObjectId(sub.task_id) },
+        { $inc: { required_workers: 1 } }
+      );
+
+      res.send({ success: true });
+    });
+
+    // my task
+    app.post("/tasks", verifyFBToken, async (req, res) => {
+      try {
+        const task = {
+          ...req.body,
+          created_by: req.decoded.email,
+          status: "pending",
+          created_at: new Date(),
+        };
+
+        const result = await tasksCollection.insertOne(task);
+        res.status(201).json({ insertedId: result.insertedId });
+      } catch (error) {
+        console.error("Error creating task:", error);
+        res.status(500).json({ error: "Failed to create task" });
+      }
+    });
+
+    // GET: My Tasks
+    app.get("/tasks/my/:email", verifyFBToken, async (req, res) => {
+      const email = req.params.email;
+      const tasks = await db
+        .collection("tasks")
+        .find({ created_by: email })
+        .sort({ compilation_date: -1 })
+        .toArray();
+      res.send(tasks);
+    });
+
+    // PUT: Update Task
+    app.put("/tasks/:id", verifyFBToken, async (req, res) => {
+      const { title, task_details, submission_details } = req.body;
+      const result = await db.collection("tasks").updateOne(
+        { _id: new ObjectId(req.params.id), created_by: req.decoded.email },
+        {
+          $set: {
+            title,
+            task_details,
+            submission_details,
+          },
+        }
+      );
+      res.send(result);
+    });
+
+    // DELETE: Delete Task
+    app.delete("/tasks/:id", verifyFBToken, async (req, res) => {
+      const taskId = req.params.id;
+      const email = req.decoded.email;
+
+      const task = await db.collection("tasks").findOne({
+        _id: new ObjectId(taskId),
+        created_by: email,
+      });
+
+      if (!task) return res.status(404).send({ message: "Task not found" });
+
+      const refill = task.required_workers * task.payable_amount;
+
+      const deleteResult = await db
+        .collection("tasks")
+        .deleteOne({ _id: new ObjectId(taskId) });
+
+      if (deleteResult.deletedCount > 0 && task.status !== "completed") {
+        await db
+          .collection("users")
+          .updateOne({ email }, { $inc: { coins: refill } });
+      }
+
+      res.send({ deleted: true, refillAmount: refill });
     });
 
     // 1. Create Payment Intent
@@ -190,6 +334,26 @@ async function run() {
       } catch (error) {
         console.error("Payment saving error:", error);
         res.status(500).json({ error: "Failed to save payment info" });
+      }
+    });
+
+    //  Route to get payment history
+    app.get("/payments/history", async (req, res) => {
+      try {
+        const email = req.query.email;
+        if (!email) {
+          return res.status(400).json({ error: "Email is required" });
+        }
+
+        const payments = await paymentsCollection
+          .find({ email })
+          .sort({ date: -1 })
+          .toArray();
+
+        res.json(payments);
+      } catch (error) {
+        console.error("Error fetching payment history:", error);
+        res.status(500).json({ error: "Internal Server Error" });
       }
     });
 
