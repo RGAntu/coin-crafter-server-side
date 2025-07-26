@@ -42,6 +42,7 @@ async function run() {
     const tasksCollection = db.collection("tasks");
     const submissionsCollection = db.collection("submissions");
     const paymentsCollection = db.collection("payments");
+    const withdrawalsCollection = db.collection("withdrawals");
 
     const verifyFBToken = async (req, res, next) => {
       const authHeader = req.headers.authorization;
@@ -107,6 +108,23 @@ async function run() {
       res.send(user);
     });
 
+    app.get("/users/coins/:email", async (req, res) => {
+      const email = req.params.email;
+
+      try {
+        const user = await usersCollection.findOne({ email });
+
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        res.json({ coins: user.coins || 0 });
+      } catch (err) {
+        console.error("Failed to fetch coins:", err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
     app.patch("/users/coins/:email", async (req, res) => {
       const email = req.params.email;
       const { amount } = req.body;
@@ -163,6 +181,23 @@ async function run() {
         .toArray();
 
       res.send(subs);
+    });
+
+    // GET /submissions/coin-balance
+    app.get("/submissions/coin-balance", async (req, res) => {
+      const email = req.query.email;
+      if (!email) return res.status(400).send({ error: "Email required" });
+
+      const submissions = await submissionsCollection
+        .find({ worker_email: email, status: "approved" })
+        .toArray();
+
+      const totalCoins = submissions.reduce(
+        (sum, s) => sum + (s.payable_amount || 0),
+        0
+      );
+
+      res.send({ totalCoins });
     });
 
     // 3. PATCH Approve Submission
@@ -354,6 +389,188 @@ async function run() {
       } catch (error) {
         console.error("Error fetching payment history:", error);
         res.status(500).json({ error: "Internal Server Error" });
+      }
+    });
+
+    // Worker
+    // GET /workers/top
+    app.get("/workers/top", async (req, res) => {
+      try {
+        // Find top 6 users sorted by coins descending
+        // Convert coins to number if stored differently (like {$numberInt: "100"})
+        const topWorkers = await usersCollection
+          .find({})
+          .sort({ coins: -1 }) // Assuming coins is stored as number
+          .limit(6)
+          .project({ name: 1, photo: 1, coins: 1 }) // Return only needed fields
+          .toArray();
+
+        res.send(topWorkers);
+      } catch (error) {
+        console.error("Error fetching top workers:", error);
+        res.status(500).send({ error: "Internal Server Error" });
+      }
+    });
+
+    app.get("/submissions/worker/:email", async (req, res) => {
+      const { email } = req.params;
+      try {
+        const allSubmissions = await submissionsCollection
+          .find({ worker_email: email })
+          .toArray();
+
+        const totalSubmissions = allSubmissions.length;
+        const pendingSubmissions = allSubmissions.filter(
+          (sub) => sub.status === "pending"
+        ).length;
+
+        const approvedSubmissions = allSubmissions.filter(
+          (sub) => sub.status === "approved"
+        );
+        const totalEarnings = approvedSubmissions.reduce(
+          (sum, sub) => sum + sub.payable_amount,
+          0
+        );
+
+        res.json({
+          totalSubmissions,
+          pendingSubmissions,
+          totalEarnings,
+          approvedSubmissions,
+        });
+      } catch (err) {
+        console.error("Failed to get worker stats:", err);
+        res.status(500).json({ error: "Failed to get worker stats" });
+      }
+    });
+
+    app.get("/submissions/approved", async (req, res) => {
+      const { email } = req.query;
+
+      if (!email) {
+        return res.status(400).json({ message: "Email is required" });
+      }
+
+      try {
+        const submissions = await submissionsCollection
+          .find({ worker_email: email, status: "approved" })
+          .sort({ submittedAt: -1 }) // optional: ensure submittedAt field is stored during submission
+          .toArray();
+
+        res.json(submissions);
+      } catch (error) {
+        console.error("Error fetching approved submissions:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    app.get("/tasks/available", async (req, res) => {
+      try {
+        const tasks = await client
+          .db("coinCrafterDB")
+          .collection("tasks")
+          .find({ required_workers: { $gt: 0 } })
+          .sort({ completion_date: 1 }) // earliest deadline first
+          .toArray();
+
+        res.status(200).json(tasks);
+      } catch (error) {
+        console.error("Error fetching available tasks:", error);
+        res.status(500).json({ message: "Server error fetching tasks." });
+      }
+    });
+
+    // GET task by ID
+    app.get("/tasks/:id", async (req, res) => {
+      try {
+        const task = await client
+          .db("coinCrafterDB")
+          .collection("tasks")
+          .findOne({ _id: new ObjectId(req.params.id) });
+
+        if (!task) return res.status(404).json({ message: "Task not found" });
+        res.json(task);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Error retrieving task." });
+      }
+    });
+
+    // POST submission by worker
+    app.post("/submissions", async (req, res) => {
+      try {
+        const {
+          task_id,
+          task_title,
+          payable_amount,
+          worker_email,
+          submission_details,
+          worker_name,
+          buyer_name,
+          buyer_email,
+          current_date,
+          status,
+        } = req.body;
+
+        if (!task_id || !worker_email || !submission_details || !task_title) {
+          return res.status(400).send({ error: "Missing required fields." });
+        }
+
+        const newSubmission = {
+          task_id: new ObjectId(task_id),
+          task_title,
+          payable_amount,
+          worker_email,
+          submission_details,
+          worker_name,
+          buyer_name,
+          buyer_email,
+          submittedAt: new Date(current_date),
+          status: status || "pending",
+        };
+
+        const result = await submissionCollection.insertOne(newSubmission);
+        res.send(result);
+      } catch (error) {
+        console.error("POST /submissions error:", error);
+        res.status(500).send({ error: "Failed to submit task." });
+      }
+    });
+
+    // GET /submissions/worker?email=worker@example.com
+    app.get("/submissions/worker", async (req, res) => {
+      try {
+        const { email } = req.query;
+        if (!email)
+          return res.status(400).json({ message: "Email is required" });
+
+        const submissions = await client
+          .db("coinCrafterDB")
+          .collection("submissions")
+          .find({ worker_email: email })
+          .sort({ submittedAt: -1 })
+          .toArray();
+
+        res.json(submissions);
+      } catch (err) {
+        console.error("Error fetching submissions:", err);
+        res.status(500).json({ message: "Error fetching submissions" });
+      }
+    });
+
+    app.post("/withdrawals", async (req, res) => {
+      try {
+        const withdrawal = req.body;
+
+        const result = await withdrawalsCollection.insertOne({
+          ...withdrawal,
+          status: "pending", // Ensure it's marked as pending
+        });
+
+        res.status(201).send({ insertedId: result.insertedId });
+      } catch (error) {
+        console.error("Error processing withdrawal:", error);
+        res.status(500).send({ error: "Internal Server Error" });
       }
     });
 
