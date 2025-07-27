@@ -99,25 +99,55 @@ async function run() {
     });
 
     // Endpoint to save user data
-    app.post("/users", async (req, res) => {
-      const newUser = req.body;
+    // app.post("/users", async (req, res) => {
+    //   const newUser = req.body;
 
-      if (!newUser?.email) {
-        return res.status(400).send({ error: "Email is required." });
+    //   if (!newUser?.email) {
+    //     return res.status(400).send({ error: "Email is required." });
+    //   }
+
+    //   // Check if the user already exists
+    //   const existingUser = await usersCollection.findOne({
+    //     email: newUser.email,
+    //   });
+
+    //   if (existingUser) {
+    //     return res.status(409).send({ error: "User already exists." });
+    //   }
+
+    //   // Insert the user
+    //   const result = await usersCollection.insertOne(newUser);
+    //   res.status(201).send(result);
+    // });
+
+    app.put("/users", async (req, res) => {
+      const { email, name, photo, role = "worker", coins = 10 } = req.body;
+
+      try {
+        const existingUser = await db.collection("users").findOne({ email });
+
+        if (existingUser) {
+          return res.send({
+            message: "User already exists",
+            user: existingUser,
+          });
+        }
+
+        const newUser = {
+          email,
+          name,
+          photo,
+          role,
+          coins,
+          createdAt: new Date(),
+        };
+
+        await db.collection("users").insertOne(newUser);
+        res.send({ message: "User created", user: newUser });
+      } catch (error) {
+        console.error("Error creating user:", error);
+        res.status(500).send({ error: "Failed to create user" });
       }
-
-      // Check if the user already exists
-      const existingUser = await usersCollection.findOne({
-        email: newUser.email,
-      });
-
-      if (existingUser) {
-        return res.status(409).send({ error: "User already exists." });
-      }
-
-      // Insert the user
-      const result = await usersCollection.insertOne(newUser);
-      res.status(201).send(result);
     });
 
     //  Route to get user role by email
