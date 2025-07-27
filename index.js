@@ -73,7 +73,7 @@ async function run() {
       }
     };
 
-    // After verifyFBToken
+    //  verifyFBToken
     const verifyAdmin = async (req, res, next) => {
       const requesterEmail = req.decoded.email;
 
