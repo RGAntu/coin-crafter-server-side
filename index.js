@@ -688,8 +688,129 @@ async function run() {
       }
     });
 
+    // ---------------------- ADMIN ----------------------
 
-   
+    // GET: All Users
+    app.get("/admin/users", verifyFBToken, async (req, res) => {
+      const users = await usersCollection.find({}).toArray();
+      res.send(users);
+    });
+
+    // GET: All Tasks (Admin Only)
+    app.get("/admin/tasks", verifyFBToken, verifyAdmin, async (req, res) => {
+      const tasks = await db
+        .collection("tasks")
+        .find()
+        .sort({ created_at: -1 })
+        .toArray();
+      res.send(tasks);
+    });
+
+    // GET: All Withdrawals with status=pending
+    app.get("/admin/withdrawals", verifyFBToken, async (req, res) => {
+      const withdrawals = await withdrawalsCollection
+        .find({ status: "pending" })
+        .toArray();
+      res.send(withdrawals);
+    });
+
+    // PATCH: Approve Withdrawal
+    app.patch(
+      "/admin/withdrawals/:id/approve",
+      verifyFBToken,
+      async (req, res) => {
+        const { id } = req.params;
+
+        const withdrawal = await withdrawalsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!withdrawal)
+          return res.status(404).send({ error: "Withdrawal not found" });
+
+        const updateStatus = await withdrawalsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "approved" } }
+        );
+
+        const deductCoin = await usersCollection.updateOne(
+          { email: withdrawal.email },
+          { $inc: { coins: -withdrawal.amount } }
+        );
+
+        res.send({ approved: true, updated: updateStatus.modifiedCount > 0 });
+      }
+    );
+
+    // PATCH: Update User Role
+    app.patch("/admin/users/:id/role", verifyFBToken, async (req, res) => {
+      const { id } = req.params;
+      const { role } = req.body;
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { role } }
+      );
+      res.send(result);
+    });
+
+    // DELETE: User
+    app.delete("/admin/users/:id", verifyFBToken, async (req, res) => {
+      const result = await usersCollection.deleteOne({
+        _id: new ObjectId(req.params.id),
+      });
+      res.send(result);
+    });
+
+    // GET: Admin Stats (worker count, buyer count, total coins, total payments)
+    app.get("/admin/stats", verifyFBToken, verifyAdmin, async (req, res) => {
+      const users = await usersCollection.find({}).toArray();
+      const totalBuyers = users.filter((u) => u.role === "buyer").length;
+      const totalWorkers = users.filter((u) => u.role === "worker").length;
+      const totalCoins = users.reduce((sum, u) => sum + (u.coins || 0), 0);
+
+      const payments = await paymentsCollection.find({}).toArray();
+      const totalPayments = payments.reduce(
+        (sum, p) => sum + (p.amount || 0),
+        0
+      );
+
+      res.send({ totalBuyers, totalWorkers, totalCoins, totalPayments });
+    });
+
+    // ManageWithdraws
+    // Get All Pending Withdrawals
+    app.get("/admin/withdrawals", verifyFBToken, async (req, res) => {
+      const withdrawals = await withdrawalsCollection
+        .find({ status: "pending" })
+        .toArray();
+      res.send(withdrawals);
+    });
+
+    // Approve Withdrawal + Deduct Coin
+    app.patch(
+      "/admin/withdrawals/:id/approve",
+      verifyFBToken,
+      async (req, res) => {
+        const { id } = req.params;
+
+        const withdrawal = await withdrawalsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!withdrawal)
+          return res.status(404).send({ error: "Withdrawal not found" });
+
+        await withdrawalsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "approved" } }
+        );
+
+        await usersCollection.updateOne(
+          { email: withdrawal.email },
+          { $inc: { coins: -withdrawal.amount } }
+        );
+
+        res.send({ approved: true });
+      }
+    );
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
