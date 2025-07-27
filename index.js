@@ -44,6 +44,7 @@ async function run() {
     const paymentsCollection = db.collection("payments");
     const withdrawalsCollection = db.collection("withdrawals");
 
+    //  Middleware
     const verifyFBToken = async (req, res, next) => {
       const authHeader = req.headers.authorization;
       if (!authHeader?.startsWith("Bearer ")) {
@@ -55,12 +56,47 @@ async function run() {
       try {
         const decoded = await admin.auth().verifyIdToken(token);
         req.decoded = decoded;
+
+        // Fetch user role from DB
+        const user = await db
+          .collection("users")
+          .findOne({ email: decoded.email });
+        if (!user) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        req.decoded.role = user.role;
         next();
       } catch (error) {
         console.error("Token verification error:", error);
         return res.status(403).send({ message: "forbidden access" });
       }
     };
+
+    // After verifyFBToken
+    const verifyAdmin = async (req, res, next) => {
+      const requesterEmail = req.decoded.email;
+
+      const user = await db
+        .collection("users")
+        .findOne({ email: requesterEmail });
+
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ message: "Forbidden: Admins only" });
+      }
+
+      next();
+    };
+
+    // GET all tasks (Admin Only)
+    app.get("/tasks", verifyFBToken, async (req, res) => {
+      if (req.decoded.role !== "admin") {
+        return res.status(403).send({ message: "Admins only" });
+      }
+
+      const tasks = await db.collection("tasks").find().toArray();
+      res.send(tasks);
+    });
 
     // Endpoint to save user data
     app.post("/users", async (req, res) => {
@@ -245,14 +281,61 @@ async function run() {
     // my task
     app.post("/tasks", verifyFBToken, async (req, res) => {
       try {
+        const {
+          task_title,
+          task_detail,
+          required_workers,
+          payable_amount,
+          completion_date,
+          submission_info,
+          task_image_url,
+        } = req.body;
+
+        // Validate required fields
+        if (!task_title || !required_workers || !payable_amount) {
+          return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        const totalCost = required_workers * payable_amount;
+
+        // Fetch buyer data to check coins
+        const buyer = await usersCollection.findOne({
+          email: req.decoded.email,
+        });
+
+        if (!buyer) {
+          return res.status(404).json({ error: "Buyer not found" });
+        }
+
+        if (buyer.coins < totalCost) {
+          return res
+            .status(400)
+            .json({ error: "Not enough coins. Please purchase more coins." });
+        }
+
+        // Deduct coins from buyer
+        await usersCollection.updateOne(
+          { email: req.decoded.email },
+          { $inc: { coins: -totalCost } }
+        );
+
+        // Prepare task object
         const task = {
-          ...req.body,
+          task_title,
+          task_detail,
+          required_workers,
+          payable_amount,
+          completion_date: new Date(completion_date),
+          submission_info,
+          task_image_url,
           created_by: req.decoded.email,
           status: "pending",
           created_at: new Date(),
         };
 
+        // Insert task
         const result = await tasksCollection.insertOne(task);
+
         res.status(201).json({ insertedId: result.insertedId });
       } catch (error) {
         console.error("Error creating task:", error);
@@ -287,31 +370,45 @@ async function run() {
       res.send(result);
     });
 
-    // DELETE: Delete Task
+    // DELETE: Delete Task (Buyer or Admin)
     app.delete("/tasks/:id", verifyFBToken, async (req, res) => {
       const taskId = req.params.id;
-      const email = req.decoded.email;
+      try {
+        const task = await db.collection("tasks").findOne({
+          _id: new ObjectId(taskId),
+        });
 
-      const task = await db.collection("tasks").findOne({
-        _id: new ObjectId(taskId),
-        created_by: email,
-      });
+        if (!task) {
+          return res.status(404).send({ message: "Task not found" });
+        }
 
-      if (!task) return res.status(404).send({ message: "Task not found" });
+        const isAdmin = req.decoded.role === "admin";
+        const isOwner = task.created_by === req.decoded.email;
 
-      const refill = task.required_workers * task.payable_amount;
+        if (!isAdmin && !isOwner) {
+          return res.status(403).send({
+            message: "Forbidden: You don't have permission to delete this task",
+          });
+        }
 
-      const deleteResult = await db
-        .collection("tasks")
-        .deleteOne({ _id: new ObjectId(taskId) });
+        const refill =
+          (task.required_workers || 0) * (task.payable_amount || 0);
 
-      if (deleteResult.deletedCount > 0 && task.status !== "completed") {
-        await db
-          .collection("users")
-          .updateOne({ email }, { $inc: { coins: refill } });
+        const deleteResult = await db
+          .collection("tasks")
+          .deleteOne({ _id: new ObjectId(taskId) });
+
+        if (deleteResult.deletedCount > 0 && task.status !== "completed") {
+          await db
+            .collection("users")
+            .updateOne({ email: task.created_by }, { $inc: { coins: refill } });
+        }
+
+        res.send({ deleted: true, refillAmount: refill });
+      } catch (error) {
+        console.error("Error deleting task:", error);
+        res.status(500).send({ message: "Internal server error" });
       }
-
-      res.send({ deleted: true, refillAmount: refill });
     });
 
     // 1. Create Payment Intent
@@ -499,6 +596,9 @@ async function run() {
     // POST submission by worker
     app.post("/submissions", async (req, res) => {
       try {
+        const data = req.body;
+        console.log(" Incoming submission body:", data);
+
         const {
           task_id,
           task_title,
@@ -510,14 +610,28 @@ async function run() {
           buyer_email,
           current_date,
           status,
-        } = req.body;
+        } = data;
 
         if (!task_id || !worker_email || !submission_details || !task_title) {
+          console.warn(" Missing required fields:", {
+            task_id,
+            task_title,
+            worker_email,
+            submission_details,
+          });
           return res.status(400).send({ error: "Missing required fields." });
         }
 
+        let taskObjectId;
+        try {
+          taskObjectId = new ObjectId(task_id);
+        } catch (err) {
+          console.warn(" Invalid ObjectId:", task_id);
+          return res.status(400).send({ error: "Invalid task_id format." });
+        }
+
         const newSubmission = {
-          task_id: new ObjectId(task_id),
+          task_id: taskObjectId,
           task_title,
           payable_amount,
           worker_email,
@@ -529,7 +643,7 @@ async function run() {
           status: status || "pending",
         };
 
-        const result = await submissionCollection.insertOne(newSubmission);
+        const result = await submissionsCollection.insertOne(newSubmission);
         res.send(result);
       } catch (error) {
         console.error("POST /submissions error:", error);
@@ -573,6 +687,9 @@ async function run() {
         res.status(500).send({ error: "Internal Server Error" });
       }
     });
+
+
+   
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
