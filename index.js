@@ -99,55 +99,25 @@ async function run() {
     });
 
     // Endpoint to save user data
-    // app.post("/users", async (req, res) => {
-    //   const newUser = req.body;
+    app.post("/users", async (req, res) => {
+      const newUser = req.body;
 
-    //   if (!newUser?.email) {
-    //     return res.status(400).send({ error: "Email is required." });
-    //   }
-
-    //   // Check if the user already exists
-    //   const existingUser = await usersCollection.findOne({
-    //     email: newUser.email,
-    //   });
-
-    //   if (existingUser) {
-    //     return res.status(409).send({ error: "User already exists." });
-    //   }
-
-    //   // Insert the user
-    //   const result = await usersCollection.insertOne(newUser);
-    //   res.status(201).send(result);
-    // });
-
-    app.put("/users", async (req, res) => {
-      const { email, name, photo, role = "worker", coins = 10 } = req.body;
-
-      try {
-        const existingUser = await db.collection("users").findOne({ email });
-
-        if (existingUser) {
-          return res.send({
-            message: "User already exists",
-            user: existingUser,
-          });
-        }
-
-        const newUser = {
-          email,
-          name,
-          photo,
-          role,
-          coins,
-          createdAt: new Date(),
-        };
-
-        await db.collection("users").insertOne(newUser);
-        res.send({ message: "User created", user: newUser });
-      } catch (error) {
-        console.error("Error creating user:", error);
-        res.status(500).send({ error: "Failed to create user" });
+      if (!newUser?.email) {
+        return res.status(400).send({ error: "Email is required." });
       }
+
+      // Check if the user already exists
+      const existingUser = await usersCollection.findOne({
+        email: newUser.email,
+      });
+
+      if (existingUser) {
+        return res.status(409).send({ error: "User already exists." });
+      }
+
+      // Insert the user
+      const result = await usersCollection.insertOne(newUser);
+      res.status(201).send(result);
     });
 
     //  Route to get user role by email
@@ -266,25 +236,53 @@ async function run() {
       res.send({ totalCoins });
     });
 
-    // 3. PATCH Approve Submission
-    app.patch("/submissions/approve/:id", async (req, res) => {
-      const id = req.params.id;
-      const sub = await submissionsCollection.findOne({
+    // // 3. PATCH Approve Submission
+    // app.patch("/submissions/approve/:id", async (req, res) => {
+    //   const id = req.params.id;
+    //   const sub = await submissionsCollection.findOne({
+    //     _id: new ObjectId(id),
+    //   });
+    //   if (!sub) return res.status(404).send({ error: "Not found" });
+
+    //   await submissionsCollection.updateOne(
+    //     { _id: new ObjectId(id) },
+    //     { $set: { status: "approved" } }
+    //   );
+
+    //   await usersCollection.updateOne(
+    //     { email: sub.worker_email },
+    //     { $inc: { coins: sub.payable_amount } }
+    //   );
+
+    //   res.send({ success: true });
+    // });
+
+    // PATCH: Update submission status (approve or reject)
+    app.patch("/submissions/update-status/:id", async (req, res) => {
+      const { id } = req.params;
+      const { status } = req.body;
+
+      const submission = await submissionsCollection.findOne({
         _id: new ObjectId(id),
       });
-      if (!sub) return res.status(404).send({ error: "Not found" });
+      if (!submission) {
+        return res.status(404).send({ error: "Submission not found" });
+      }
 
-      await submissionsCollection.updateOne(
+      const updateResult = await submissionsCollection.updateOne(
         { _id: new ObjectId(id) },
-        { $set: { status: "approved" } }
+        { $set: { status } }
       );
 
-      await usersCollection.updateOne(
-        { email: sub.worker_email },
-        { $inc: { coins: sub.payable_amount } }
-      );
+      // If approved, add coins
+      if (status === "approved") {
+        await usersCollection.updateOne(
+          { email: submission.worker_email },
+          { $inc: { coins: submission.payable_amount } }
+        );
+      }
 
-      res.send({ success: true });
+      res.send({ success: true, modifiedCount: updateResult.modifiedCount });
     });
 
     // 4. PATCH Reject Submission
@@ -386,17 +384,19 @@ async function run() {
 
     // PUT: Update Task
     app.put("/tasks/:id", verifyFBToken, async (req, res) => {
-      const { title, task_details, submission_details } = req.body;
+      const { task_title, task_detail, submission_info } = req.body;
+
       const result = await db.collection("tasks").updateOne(
         { _id: new ObjectId(req.params.id), created_by: req.decoded.email },
         {
           $set: {
-            title,
-            task_details,
-            submission_details,
+            task_title,
+            task_detail,
+            submission_info,
           },
         }
       );
+
       res.send(result);
     });
 
@@ -545,7 +545,7 @@ async function run() {
         const allSubmissions = await submissionsCollection
           .find({ worker_email: email })
           .toArray();
-
+        console.log(allSubmissions);
         const totalSubmissions = allSubmissions.length;
         const pendingSubmissions = allSubmissions.filter(
           (sub) => sub.status === "pending"
@@ -843,10 +843,10 @@ async function run() {
     );
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
