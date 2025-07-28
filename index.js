@@ -236,27 +236,6 @@ async function run() {
       res.send({ totalCoins });
     });
 
-    // // 3. PATCH Approve Submission
-    // app.patch("/submissions/approve/:id", async (req, res) => {
-    //   const id = req.params.id;
-    //   const sub = await submissionsCollection.findOne({
-    //     _id: new ObjectId(id),
-    //   });
-    //   if (!sub) return res.status(404).send({ error: "Not found" });
-
-    //   await submissionsCollection.updateOne(
-    //     { _id: new ObjectId(id) },
-    //     { $set: { status: "approved" } }
-    //   );
-
-    //   await usersCollection.updateOne(
-    //     { email: sub.worker_email },
-    //     { $inc: { coins: sub.payable_amount } }
-    //   );
-
-    //   res.send({ success: true });
-    // });
-
     // PATCH: Update submission status (approve or reject)
     app.patch("/submissions/update-status/:id", async (req, res) => {
       const { id } = req.params;
@@ -311,7 +290,7 @@ async function run() {
       try {
         const {
           task_title,
-          task_detail,
+          task_details,
           required_workers,
           payable_amount,
           completion_date,
@@ -350,7 +329,7 @@ async function run() {
         // Prepare task object
         const task = {
           task_title,
-          task_detail,
+          task_detail: task_details,
           required_workers,
           payable_amount,
           completion_date: new Date(completion_date),
