@@ -45,35 +45,46 @@ async function run() {
     const withdrawalsCollection = db.collection("withdrawals");
 
     //  Middleware
-    const verifyFBToken = async (req, res, next) => {
-      const authHeader = req.headers.authorization;
-      if (!authHeader?.startsWith("Bearer ")) {
-        return res.status(401).send({ message: "unauthorized access" });
-      }
 
-      const token = authHeader.split(" ")[1];
+    const verifyFBToken = (db) => {
+      return async (req, res, next) => {
+        const authHeader = req.headers.authorization;
 
-      try {
-        const decoded = await admin.auth().verifyIdToken(token);
-        req.decoded = decoded;
-
-        // Fetch user role from DB
-        const user = await db
-          .collection("users")
-          .findOne({ email: decoded.email });
-        if (!user) {
-          return res.status(404).send({ message: "User not found" });
+        // No token — send 401
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+          return res
+            .status(401)
+            .json({ message: "Unauthorized: No token provided" });
         }
 
-        req.decoded.role = user.role;
-        next();
-      } catch (error) {
-        console.error("Token verification error:", error);
-        return res.status(403).send({ message: "forbidden access" });
-      }
+        const token = authHeader.split(" ")[1];
+
+        try {
+          // Verify Firebase token
+          const decodedToken = await admin.auth().verifyIdToken(token);
+          req.decoded = decodedToken;
+
+          // Get user from DB
+          const user = await db
+            .collection("users")
+            .findOne({ email: decodedToken.email });
+
+          if (!user) {
+            return res.status(404).json({ message: "User not found" });
+          }
+
+          // Attach role for role-based middleware
+          req.decoded.role = user.role;
+
+          next();
+        } catch (error) {
+          console.error("Token verification error:", error.message);
+          return res.status(400).json({ message: "Invalid token" });
+        }
+      };
     };
 
-    //  verifyFBToken
+    //  verifyAdmin
     const verifyAdmin = async (req, res, next) => {
       const requesterEmail = req.decoded.email;
 
@@ -88,8 +99,38 @@ async function run() {
       next();
     };
 
+    //verifyBuyer
+    const verifyBuyer = async (req, res, next) => {
+      const requesterEmail = req.decoded.email;
+
+      const user = await db
+        .collection("users")
+        .findOne({ email: requesterEmail });
+
+      if (!user || user.role !== "buyer") {
+        return res.status(403).send({ message: "Forbidden: Buyers only" });
+      }
+
+      next();
+    };
+
+    // verifyWorker
+    const verifyWorker = async (req, res, next) => {
+      const requesterEmail = req.decoded.email;
+
+      const user = await db
+        .collection("users")
+        .findOne({ email: requesterEmail });
+
+      if (!user || user.role !== "worker") {
+        return res.status(403).send({ message: "Forbidden: Workers only" });
+      }
+
+      next();
+    };
+
     // GET all tasks (Admin Only)
-    app.get("/tasks", verifyFBToken, async (req, res) => {
+    app.get("/tasks", verifyFBToken(db), async (req, res) => {
       if (req.decoded.role !== "admin") {
         return res.status(403).send({ message: "Admins only" });
       }
@@ -170,54 +211,66 @@ async function run() {
       res.send(result);
     });
 
-    // Buyer
+    //  ------------------ Buyer --------------------
 
     // 1. GET Buyer Stats
-    app.get("/buyer/stats", async (req, res) => {
-      const buyerEmail = req.query.email;
-      if (!buyerEmail) return res.status(400).send({ error: "Email required" });
+    app.get(
+      "/buyer/stats",
+      verifyFBToken(db),
+      verifyBuyer,
+      async (req, res) => {
+        const buyerEmail = req.query.email;
+        if (!buyerEmail)
+          return res.status(400).send({ error: "Email required" });
 
-      const totalTasks = await tasksCollection.countDocuments({
-        buyer_email: buyerEmail,
-      });
-
-      const buyerTasks = await tasksCollection
-        .find({ buyer_email: buyerEmail })
-        .toArray();
-      const pendingWorkers = buyerTasks.reduce(
-        (acc, task) => acc + (task.required_workers || 0),
-        0
-      );
-
-      const paidSubs = await submissionsCollection
-        .find({
+        const totalTasks = await tasksCollection.countDocuments({
           buyer_email: buyerEmail,
-          status: "approved",
-        })
-        .toArray();
+        });
 
-      const totalPaid = paidSubs.reduce(
-        (sum, s) => sum + (s.payable_amount || 0),
-        0
-      );
+        const buyerTasks = await tasksCollection
+          .find({ buyer_email: buyerEmail })
+          .toArray();
+        const pendingWorkers = buyerTasks.reduce(
+          (acc, task) => acc + (task.required_workers || 0),
+          0
+        );
 
-      res.send({ totalTasks, pendingWorkers, totalPaid });
-    });
+        const paidSubs = await submissionsCollection
+          .find({
+            buyer_email: buyerEmail,
+            status: "approved",
+          })
+          .toArray();
+
+        const totalPaid = paidSubs.reduce(
+          (sum, s) => sum + (s.payable_amount || 0),
+          0
+        );
+
+        res.send({ totalTasks, pendingWorkers, totalPaid });
+      }
+    );
 
     // 2. GET Pending Submissions
-    app.get("/buyer/pending-submissions", async (req, res) => {
-      const buyerEmail = req.query.email;
-      if (!buyerEmail) return res.status(400).send({ error: "Email required" });
+    app.get(
+      "/buyer/pending-submissions",
+      verifyFBToken(db),
+      verifyBuyer,
+      async (req, res) => {
+        const buyerEmail = req.query.email;
+        if (!buyerEmail)
+          return res.status(400).send({ error: "Email required" });
 
-      const subs = await submissionsCollection
-        .find({
-          buyer_email: buyerEmail,
-          status: "pending",
-        })
-        .toArray();
+        const subs = await submissionsCollection
+          .find({
+            buyer_email: buyerEmail,
+            status: "pending",
+          })
+          .toArray();
 
-      res.send(subs);
-    });
+        res.send(subs);
+      }
+    );
 
     // GET /submissions/coin-balance
     app.get("/submissions/coin-balance", async (req, res) => {
@@ -237,56 +290,66 @@ async function run() {
     });
 
     // PATCH: Update submission status (approve or reject)
-    app.patch("/submissions/update-status/:id", async (req, res) => {
-      const { id } = req.params;
-      const { status } = req.body;
+    app.patch(
+      "/submissions/update-status/:id",
+      verifyFBToken(db),
+      verifyBuyer,
+      async (req, res) => {
+        const { id } = req.params;
+        const { status } = req.body;
 
-      const submission = await submissionsCollection.findOne({
-        _id: new ObjectId(id),
-      });
-      if (!submission) {
-        return res.status(404).send({ error: "Submission not found" });
-      }
+        const submission = await submissionsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!submission) {
+          return res.status(404).send({ error: "Submission not found" });
+        }
 
-      const updateResult = await submissionsCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { status } }
-      );
-
-      // If approved, add coins
-      if (status === "approved") {
-        await usersCollection.updateOne(
-          { email: submission.worker_email },
-          { $inc: { coins: submission.payable_amount } }
+        const updateResult = await submissionsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status } }
         );
-      }
 
-      res.send({ success: true, modifiedCount: updateResult.modifiedCount });
-    });
+        // If approved, add coins
+        if (status === "approved") {
+          await usersCollection.updateOne(
+            { email: submission.worker_email },
+            { $inc: { coins: submission.payable_amount } }
+          );
+        }
+
+        res.send({ success: true, modifiedCount: updateResult.modifiedCount });
+      }
+    );
 
     // 4. PATCH Reject Submission
-    app.patch("/submissions/reject/:id", async (req, res) => {
-      const id = req.params.id;
-      const sub = await submissionsCollection.findOne({
-        _id: new ObjectId(id),
-      });
-      if (!sub) return res.status(404).send({ error: "Not found" });
+    app.patch(
+      "/submissions/reject/:id",
+      verifyFBToken(db),
+      verifyBuyer,
+      async (req, res) => {
+        const id = req.params.id;
+        const sub = await submissionsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!sub) return res.status(404).send({ error: "Not found" });
 
-      await submissionsCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { status: "rejected" } }
-      );
+        await submissionsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "rejected" } }
+        );
 
-      await tasksCollection.updateOne(
-        { _id: new ObjectId(sub.task_id) },
-        { $inc: { required_workers: 1 } }
-      );
+        await tasksCollection.updateOne(
+          { _id: new ObjectId(sub.task_id) },
+          { $inc: { required_workers: 1 } }
+        );
 
-      res.send({ success: true });
-    });
+        res.send({ success: true });
+      }
+    );
 
     // my task
-    app.post("/tasks", verifyFBToken, async (req, res) => {
+    app.post("/tasks", verifyFBToken(db), verifyBuyer, async (req, res) => {
       try {
         const {
           task_title,
@@ -351,18 +414,23 @@ async function run() {
     });
 
     // GET: My Tasks
-    app.get("/tasks/my/:email", verifyFBToken, async (req, res) => {
-      const email = req.params.email;
-      const tasks = await db
-        .collection("tasks")
-        .find({ created_by: email })
-        .sort({ compilation_date: -1 })
-        .toArray();
-      res.send(tasks);
-    });
+    app.get(
+      "/tasks/my/:email",
+      verifyFBToken(db),
+      verifyBuyer,
+      async (req, res) => {
+        const email = req.params.email;
+        const tasks = await db
+          .collection("tasks")
+          .find({ created_by: email })
+          .sort({ compilation_date: -1 })
+          .toArray();
+        res.send(tasks);
+      }
+    );
 
     // PUT: Update Task
-    app.put("/tasks/:id", verifyFBToken, async (req, res) => {
+    app.put("/tasks/:id", verifyFBToken(db), verifyBuyer, async (req, res) => {
       const { task_title, task_detail, submission_info } = req.body;
 
       const result = await db.collection("tasks").updateOne(
@@ -380,45 +448,54 @@ async function run() {
     });
 
     // DELETE: Delete Task (Buyer or Admin)
-    app.delete("/tasks/:id", verifyFBToken, async (req, res) => {
-      const taskId = req.params.id;
-      try {
-        const task = await db.collection("tasks").findOne({
-          _id: new ObjectId(taskId),
-        });
-
-        if (!task) {
-          return res.status(404).send({ message: "Task not found" });
-        }
-
-        const isAdmin = req.decoded.role === "admin";
-        const isOwner = task.created_by === req.decoded.email;
-
-        if (!isAdmin && !isOwner) {
-          return res.status(403).send({
-            message: "Forbidden: You don't have permission to delete this task",
+    app.delete(
+      "/tasks/:id",
+      verifyFBToken(db),
+      verifyBuyer,
+      async (req, res) => {
+        const taskId = req.params.id;
+        try {
+          const task = await db.collection("tasks").findOne({
+            _id: new ObjectId(taskId),
           });
+
+          if (!task) {
+            return res.status(404).send({ message: "Task not found" });
+          }
+
+          const isAdmin = req.decoded.role === "admin";
+          const isOwner = task.created_by === req.decoded.email;
+
+          if (!isAdmin && !isOwner) {
+            return res.status(403).send({
+              message:
+                "Forbidden: You don't have permission to delete this task",
+            });
+          }
+
+          const refill =
+            (task.required_workers || 0) * (task.payable_amount || 0);
+
+          const deleteResult = await db
+            .collection("tasks")
+            .deleteOne({ _id: new ObjectId(taskId) });
+
+          if (deleteResult.deletedCount > 0 && task.status !== "completed") {
+            await db
+              .collection("users")
+              .updateOne(
+                { email: task.created_by },
+                { $inc: { coins: refill } }
+              );
+          }
+
+          res.send({ deleted: true, refillAmount: refill });
+        } catch (error) {
+          console.error("Error deleting task:", error);
+          res.status(500).send({ message: "Internal server error" });
         }
-
-        const refill =
-          (task.required_workers || 0) * (task.payable_amount || 0);
-
-        const deleteResult = await db
-          .collection("tasks")
-          .deleteOne({ _id: new ObjectId(taskId) });
-
-        if (deleteResult.deletedCount > 0 && task.status !== "completed") {
-          await db
-            .collection("users")
-            .updateOne({ email: task.created_by }, { $inc: { coins: refill } });
-        }
-
-        res.send({ deleted: true, refillAmount: refill });
-      } catch (error) {
-        console.error("Error deleting task:", error);
-        res.status(500).send({ message: "Internal server error" });
       }
-    });
+    );
 
     // 1. Create Payment Intent
     app.post("/create-payment-intent", async (req, res) => {
@@ -498,95 +575,110 @@ async function run() {
       }
     });
 
-    // Worker
+    // ----------------------- Worker ---------------------------
     // GET /workers/top
-app.get("/workers/top", async (req, res) => {
-  try {
-    // Filter by role: 'worker', sort by coins descending
-    const topWorkers = await usersCollection
-      .find({ role: "worker" }) //  Only workers
-      .sort({ coins: -1 })
-      .limit(6)
-      .project({ name: 1, photo: 1, coins: 1 }) // return only needed fields
-      .toArray();
-
-    res.send(topWorkers);
-  } catch (error) {
-    console.error("Error fetching top workers:", error);
-    res.status(500).send({ error: "Internal Server Error" });
-  }
-});
-
-    app.get("/submissions/worker/:email", async (req, res) => {
-      const { email } = req.params;
+    app.get("/workers/top", async (req, res) => {
       try {
-        const allSubmissions = await submissionsCollection
-          .find({ worker_email: email })
-          .toArray();
-        console.log(allSubmissions);
-        const totalSubmissions = allSubmissions.length;
-        const pendingSubmissions = allSubmissions.filter(
-          (sub) => sub.status === "pending"
-        ).length;
-
-        const approvedSubmissions = allSubmissions.filter(
-          (sub) => sub.status === "approved"
-        );
-        const totalEarnings = approvedSubmissions.reduce(
-          (sum, sub) => sum + sub.payable_amount,
-          0
-        );
-
-        res.json({
-          totalSubmissions,
-          pendingSubmissions,
-          totalEarnings,
-          approvedSubmissions,
-        });
-      } catch (err) {
-        console.error("Failed to get worker stats:", err);
-        res.status(500).json({ error: "Failed to get worker stats" });
-      }
-    });
-
-    app.get("/submissions/approved", async (req, res) => {
-      const { email } = req.query;
-
-      if (!email) {
-        return res.status(400).json({ message: "Email is required" });
-      }
-
-      try {
-        const submissions = await submissionsCollection
-          .find({ worker_email: email, status: "approved" })
-          .sort({ submittedAt: -1 }) // optional: ensure submittedAt field is stored during submission
+        // Filter by role: 'worker', sort by coins descending
+        const topWorkers = await usersCollection
+          .find({ role: "worker" }) //  Only workers
+          .sort({ coins: -1 })
+          .limit(6)
+          .project({ name: 1, photo: 1, coins: 1 }) // return only needed fields
           .toArray();
 
-        res.json(submissions);
+        res.send(topWorkers);
       } catch (error) {
-        console.error("Error fetching approved submissions:", error);
-        res.status(500).json({ message: "Internal server error" });
+        console.error("Error fetching top workers:", error);
+        res.status(500).send({ error: "Internal Server Error" });
       }
     });
 
-    app.get("/tasks/available", async (req, res) => {
-      try {
-        const tasks = await client
-          .db("coinCrafterDB")
-          .collection("tasks")
-          .find({ required_workers: { $gt: 0 } })
-          .sort({ completion_date: 1 }) // earliest deadline first
-          .toArray();
+    app.get(
+      "/submissions/worker/:email",
+      verifyFBToken(db),
+      verifyWorker,
+      async (req, res) => {
+        const { email } = req.params;
+        try {
+          const allSubmissions = await submissionsCollection
+            .find({ worker_email: email })
+            .toArray();
+          console.log(allSubmissions);
+          const totalSubmissions = allSubmissions.length;
+          const pendingSubmissions = allSubmissions.filter(
+            (sub) => sub.status === "pending"
+          ).length;
 
-        res.status(200).json(tasks);
-      } catch (error) {
-        console.error("Error fetching available tasks:", error);
-        res.status(500).json({ message: "Server error fetching tasks." });
+          const approvedSubmissions = allSubmissions.filter(
+            (sub) => sub.status === "approved"
+          );
+          const totalEarnings = approvedSubmissions.reduce(
+            (sum, sub) => sum + sub.payable_amount,
+            0
+          );
+
+          res.json({
+            totalSubmissions,
+            pendingSubmissions,
+            totalEarnings,
+            approvedSubmissions,
+          });
+        } catch (err) {
+          console.error("Failed to get worker stats:", err);
+          res.status(500).json({ error: "Failed to get worker stats" });
+        }
       }
-    });
+    );
+
+    app.get(
+      "/submissions/approved",
+      verifyFBToken(db),
+      verifyWorker,
+      async (req, res) => {
+        const { email } = req.query;
+
+        if (!email) {
+          return res.status(400).json({ message: "Email is required" });
+        }
+
+        try {
+          const submissions = await submissionsCollection
+            .find({ worker_email: email, status: "approved" })
+            .sort({ submittedAt: -1 }) // optional: ensure submittedAt field is stored during submission
+            .toArray();
+
+          res.json(submissions);
+        } catch (error) {
+          console.error("Error fetching approved submissions:", error);
+          res.status(500).json({ message: "Internal server error" });
+        }
+      }
+    );
+
+    app.get(
+      "/tasks/available",
+      verifyFBToken(db),
+      verifyWorker,
+      async (req, res) => {
+        try {
+          const tasks = await client
+            .db("coinCrafterDB")
+            .collection("tasks")
+            .find({ required_workers: { $gt: 0 } })
+            .sort({ completion_date: 1 }) // earliest deadline first
+            .toArray();
+
+          res.status(200).json(tasks);
+        } catch (error) {
+          console.error("Error fetching available tasks:", error);
+          res.status(500).json({ message: "Server error fetching tasks." });
+        }
+      }
+    );
 
     // GET task by ID
-    app.get("/tasks/:id", async (req, res) => {
+    app.get("/tasks/:id", verifyFBToken(db), verifyWorker, async (req, res) => {
       try {
         const task = await client
           .db("coinCrafterDB")
@@ -601,167 +693,199 @@ app.get("/workers/top", async (req, res) => {
       }
     });
 
+    // get pagination
+    app.get(
+      "/submissions",
+      verifyFBToken(db),
+      verifyWorker,
+      async (req, res) => {
+        try {
+          const email = req.query.email;
+          const page = parseInt(req.query.page) || 1;
+          const limit = parseInt(req.query.limit) || 5;
+          const skip = (page - 1) * limit;
 
+          const query = { worker_email: email };
 
-// get pagination 
-//     app.get("/submissions", verifyFBToken, async (req, res) => {
-//   try {
-//     const email = req.query.email;
-//     const page = parseInt(req.query.page) || 1;
-//     const limit = parseInt(req.query.limit) || 5;
-//     const skip = (page - 1) * limit;
+          const totalCount = await db
+            .collection("submissions")
+            .countDocuments(query);
+          const submissions = await db
+            .collection("submissions")
+            .find(query)
+            .sort({ submittedAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray();
 
-//     const query = { worker_email: email };
-
-//     const totalCount = await db.collection("submissions").countDocuments(query);
-//     const submissions = await db
-//       .collection("submissions")
-//       .find(query)
-//       .sort({ submittedAt: -1 })
-//       .skip(skip)
-//       .limit(limit)
-//       .toArray();
-
-//     res.send({
-//       submissions,
-//       totalPages: Math.ceil(totalCount / limit),
-//       currentPage: page,
-//     });
-//   } catch (err) {
-//     console.error("Error fetching submissions:", err);
-//     res.status(500).send({ error: "Failed to fetch submissions" });
-//   }
-// });
-
-
-
-
+          res.send({
+            submissions,
+            totalPages: Math.ceil(totalCount / limit),
+            currentPage: page,
+          });
+        } catch (err) {
+          console.error("Error fetching submissions:", err);
+          res.status(500).send({ error: "Failed to fetch submissions" });
+        }
+      }
+    );
 
     // POST submission by worker
-    app.post("/submissions", async (req, res) => {
-      try {
-        const data = req.body;
-        console.log(" Incoming submission body:", data);
+    app.post(
+      "/submissions",
+      verifyFBToken(db),
+      verifyWorker,
+      async (req, res) => {
+        try {
+          const data = req.body;
+          console.log(" Incoming submission body:", data);
 
-        const {
-          task_id,
-          task_title,
-          payable_amount,
-          worker_email,
-          submission_details,
-          worker_name,
-          buyer_name,
-          buyer_email,
-          current_date,
-          status,
-        } = data;
-
-        if (!task_id || !worker_email || !submission_details || !task_title) {
-          console.warn(" Missing required fields:", {
+          const {
             task_id,
             task_title,
+            payable_amount,
             worker_email,
             submission_details,
-          });
-          return res.status(400).send({ error: "Missing required fields." });
+            worker_name,
+            buyer_name,
+            buyer_email,
+            current_date,
+            status,
+          } = data;
+
+          if (!task_id || !worker_email || !submission_details || !task_title) {
+            console.warn(" Missing required fields:", {
+              task_id,
+              task_title,
+              worker_email,
+              submission_details,
+            });
+            return res.status(400).send({ error: "Missing required fields." });
+          }
+
+          let taskObjectId;
+          try {
+            taskObjectId = new ObjectId(task_id);
+          } catch (err) {
+            console.warn(" Invalid ObjectId:", task_id);
+            return res.status(400).send({ error: "Invalid task_id format." });
+          }
+
+          const newSubmission = {
+            task_id: taskObjectId,
+            task_title,
+            payable_amount,
+            worker_email,
+            submission_details,
+            worker_name,
+            buyer_name,
+            buyer_email,
+            submittedAt: new Date(current_date),
+            status: status || "pending",
+          };
+
+          const result = await submissionsCollection.insertOne(newSubmission);
+          res.send(result);
+        } catch (error) {
+          console.error("POST /submissions error:", error);
+          res.status(500).send({ error: "Failed to submit task." });
         }
-
-        let taskObjectId;
-        try {
-          taskObjectId = new ObjectId(task_id);
-        } catch (err) {
-          console.warn(" Invalid ObjectId:", task_id);
-          return res.status(400).send({ error: "Invalid task_id format." });
-        }
-
-        const newSubmission = {
-          task_id: taskObjectId,
-          task_title,
-          payable_amount,
-          worker_email,
-          submission_details,
-          worker_name,
-          buyer_name,
-          buyer_email,
-          submittedAt: new Date(current_date),
-          status: status || "pending",
-        };
-
-        const result = await submissionsCollection.insertOne(newSubmission);
-        res.send(result);
-      } catch (error) {
-        console.error("POST /submissions error:", error);
-        res.status(500).send({ error: "Failed to submit task." });
       }
-    });
+    );
 
     // GET /submissions/worker?email=worker@example.com
-    app.get("/submissions/worker", async (req, res) => {
-      try {
-        const { email } = req.query;
-        if (!email)
-          return res.status(400).json({ message: "Email is required" });
+    app.get(
+      "/submissions/worker",
+      verifyFBToken(db),
+      verifyWorker,
+      async (req, res) => {
+        try {
+          const { email } = req.query;
+          if (!email)
+            return res.status(400).json({ message: "Email is required" });
 
-        const submissions = await client
-          .db("coinCrafterDB")
-          .collection("submissions")
-          .find({ worker_email: email })
-          .sort({ submittedAt: -1 })
-          .toArray();
+          const submissions = await client
+            .db("coinCrafterDB")
+            .collection("submissions")
+            .find({ worker_email: email })
+            .sort({ submittedAt: -1 })
+            .toArray();
 
-        res.json(submissions);
-      } catch (err) {
-        console.error("Error fetching submissions:", err);
-        res.status(500).json({ message: "Error fetching submissions" });
+          res.json(submissions);
+        } catch (err) {
+          console.error("Error fetching submissions:", err);
+          res.status(500).json({ message: "Error fetching submissions" });
+        }
       }
-    });
+    );
 
-    app.post("/withdrawals", async (req, res) => {
-      try {
-        const withdrawal = req.body;
+    app.post(
+      "/withdrawals",
+      verifyFBToken(db),
+      verifyWorker,
+      async (req, res) => {
+        try {
+          const withdrawal = req.body;
 
-        const result = await withdrawalsCollection.insertOne({
-          ...withdrawal,
-          status: "pending", // Ensure it's marked as pending
-        });
+          const result = await withdrawalsCollection.insertOne({
+            ...withdrawal,
+            status: "pending", // Ensure it's marked as pending
+          });
 
-        res.status(201).send({ insertedId: result.insertedId });
-      } catch (error) {
-        console.error("Error processing withdrawal:", error);
-        res.status(500).send({ error: "Internal Server Error" });
+          res.status(201).send({ insertedId: result.insertedId });
+        } catch (error) {
+          console.error("Error processing withdrawal:", error);
+          res.status(500).send({ error: "Internal Server Error" });
+        }
       }
-    });
+    );
 
     // ---------------------- ADMIN ----------------------
 
     // GET: All Users
-    app.get("/admin/users", verifyFBToken, async (req, res) => {
-      const users = await usersCollection.find({}).toArray();
-      res.send(users);
-    });
+    app.get(
+      "/admin/users",
+      verifyFBToken(db),
+      verifyAdmin,
+      async (req, res) => {
+        const users = await usersCollection.find({}).toArray();
+        res.send(users);
+      }
+    );
 
     // GET: All Tasks (Admin Only)
-    app.get("/admin/tasks", verifyFBToken, verifyAdmin, async (req, res) => {
-      const tasks = await db
-        .collection("tasks")
-        .find()
-        .sort({ created_at: -1 })
-        .toArray();
-      res.send(tasks);
-    });
+    app.get(
+      "/admin/tasks",
+      verifyFBToken(db),
+      verifyAdmin,
+      async (req, res) => {
+        const tasks = await db
+          .collection("tasks")
+          .find()
+          .sort({ created_at: -1 })
+          .toArray();
+        res.send(tasks);
+      }
+    );
 
     // GET: All Withdrawals with status=pending
-    app.get("/admin/withdrawals", verifyFBToken, async (req, res) => {
-      const withdrawals = await withdrawalsCollection
-        .find({ status: "pending" })
-        .toArray();
-      res.send(withdrawals);
-    });
+    app.get(
+      "/admin/withdrawals",
+      verifyFBToken(db),
+      verifyAdmin,
+      async (req, res) => {
+        const withdrawals = await withdrawalsCollection
+          .find({ status: "pending" })
+          .toArray();
+        res.send(withdrawals);
+      }
+    );
 
     // PATCH: Approve Withdrawal
     app.patch(
       "/admin/withdrawals/:id/approve",
-      verifyFBToken,
+      verifyFBToken(db),
+      verifyAdmin,
       async (req, res) => {
         const { id } = req.params;
 
@@ -786,26 +910,36 @@ app.get("/workers/top", async (req, res) => {
     );
 
     // PATCH: Update User Role
-    app.patch("/admin/users/:id/role", verifyFBToken, async (req, res) => {
-      const { id } = req.params;
-      const { role } = req.body;
-      const result = await usersCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { role } }
-      );
-      res.send(result);
-    });
+    app.patch(
+      "/admin/users/:id/role",
+      verifyFBToken(db),
+      verifyAdmin,
+      async (req, res) => {
+        const { id } = req.params;
+        const { role } = req.body;
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role } }
+        );
+        res.send(result);
+      }
+    );
 
     // DELETE: User
-    app.delete("/admin/users/:id", verifyFBToken, async (req, res) => {
-      const result = await usersCollection.deleteOne({
-        _id: new ObjectId(req.params.id),
-      });
-      res.send(result);
-    });
+    app.delete(
+      "/admin/users/:id",
+      verifyFBToken(db),
+      verifyAdmin,
+      async (req, res) => {
+        const result = await usersCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.send(result);
+      }
+    );
 
     // GET: Admin Stats (worker count, buyer count, total coins, total payments)
-    app.get("/admin/stats", verifyFBToken, verifyAdmin, async (req, res) => {
+    app.get("/admin/stats", async (req, res) => {
       const users = await usersCollection.find({}).toArray();
       const totalBuyers = users.filter((u) => u.role === "buyer").length;
       const totalWorkers = users.filter((u) => u.role === "worker").length;
@@ -821,40 +955,6 @@ app.get("/workers/top", async (req, res) => {
     });
 
     // ManageWithdraws
-    // Get All Pending Withdrawals
-    app.get("/admin/withdrawals", verifyFBToken, async (req, res) => {
-      const withdrawals = await withdrawalsCollection
-        .find({ status: "pending" })
-        .toArray();
-      res.send(withdrawals);
-    });
-
-    // Approve Withdrawal + Deduct Coin
-    app.patch(
-      "/admin/withdrawals/:id/approve",
-      verifyFBToken,
-      async (req, res) => {
-        const { id } = req.params;
-
-        const withdrawal = await withdrawalsCollection.findOne({
-          _id: new ObjectId(id),
-        });
-        if (!withdrawal)
-          return res.status(404).send({ error: "Withdrawal not found" });
-
-        await withdrawalsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { status: "approved" } }
-        );
-
-        await usersCollection.updateOne(
-          { email: withdrawal.email },
-          { $inc: { coins: -withdrawal.amount } }
-        );
-
-        res.send({ approved: true });
-      }
-    );
 
     // Send a ping to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
