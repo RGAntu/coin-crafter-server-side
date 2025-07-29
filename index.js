@@ -500,23 +500,22 @@ async function run() {
 
     // Worker
     // GET /workers/top
-    app.get("/workers/top", async (req, res) => {
-      try {
-        // Find top 6 users sorted by coins descending
-        // Convert coins to number if stored differently (like {$numberInt: "100"})
-        const topWorkers = await usersCollection
-          .find({})
-          .sort({ coins: -1 }) // Assuming coins is stored as number
-          .limit(6)
-          .project({ name: 1, photo: 1, coins: 1 }) // Return only needed fields
-          .toArray();
+app.get("/workers/top", async (req, res) => {
+  try {
+    // Filter by role: 'worker', sort by coins descending
+    const topWorkers = await usersCollection
+      .find({ role: "worker" }) //  Only workers
+      .sort({ coins: -1 })
+      .limit(6)
+      .project({ name: 1, photo: 1, coins: 1 }) // return only needed fields
+      .toArray();
 
-        res.send(topWorkers);
-      } catch (error) {
-        console.error("Error fetching top workers:", error);
-        res.status(500).send({ error: "Internal Server Error" });
-      }
-    });
+    res.send(topWorkers);
+  } catch (error) {
+    console.error("Error fetching top workers:", error);
+    res.status(500).send({ error: "Internal Server Error" });
+  }
+});
 
     app.get("/submissions/worker/:email", async (req, res) => {
       const { email } = req.params;
@@ -601,6 +600,42 @@ async function run() {
         res.status(500).json({ message: "Error retrieving task." });
       }
     });
+
+
+
+// get pagination 
+//     app.get("/submissions", verifyFBToken, async (req, res) => {
+//   try {
+//     const email = req.query.email;
+//     const page = parseInt(req.query.page) || 1;
+//     const limit = parseInt(req.query.limit) || 5;
+//     const skip = (page - 1) * limit;
+
+//     const query = { worker_email: email };
+
+//     const totalCount = await db.collection("submissions").countDocuments(query);
+//     const submissions = await db
+//       .collection("submissions")
+//       .find(query)
+//       .sort({ submittedAt: -1 })
+//       .skip(skip)
+//       .limit(limit)
+//       .toArray();
+
+//     res.send({
+//       submissions,
+//       totalPages: Math.ceil(totalCount / limit),
+//       currentPage: page,
+//     });
+//   } catch (err) {
+//     console.error("Error fetching submissions:", err);
+//     res.status(500).send({ error: "Failed to fetch submissions" });
+//   }
+// });
+
+
+
+
 
     // POST submission by worker
     app.post("/submissions", async (req, res) => {
