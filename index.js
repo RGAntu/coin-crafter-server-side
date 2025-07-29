@@ -692,43 +692,7 @@ async function run() {
         res.status(500).json({ message: "Error retrieving task." });
       }
     });
-
-    // get pagination
-    app.get(
-      "/submissions",
-      verifyFBToken(db),
-      verifyWorker,
-      async (req, res) => {
-        try {
-          const email = req.query.email;
-          const page = parseInt(req.query.page) || 1;
-          const limit = parseInt(req.query.limit) || 5;
-          const skip = (page - 1) * limit;
-
-          const query = { worker_email: email };
-
-          const totalCount = await db
-            .collection("submissions")
-            .countDocuments(query);
-          const submissions = await db
-            .collection("submissions")
-            .find(query)
-            .sort({ submittedAt: -1 })
-            .skip(skip)
-            .limit(limit)
-            .toArray();
-
-          res.send({
-            submissions,
-            totalPages: Math.ceil(totalCount / limit),
-            currentPage: page,
-          });
-        } catch (err) {
-          console.error("Error fetching submissions:", err);
-          res.status(500).send({ error: "Failed to fetch submissions" });
-        }
-      }
-    );
+    
 
     // POST submission by worker
     app.post(
@@ -954,7 +918,6 @@ async function run() {
       res.send({ totalBuyers, totalWorkers, totalCoins, totalPayments });
     });
 
-    // ManageWithdraws
 
     // Send a ping to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
