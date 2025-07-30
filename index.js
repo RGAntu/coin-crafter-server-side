@@ -7,6 +7,8 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const admin = require("firebase-admin");
 const { default: Stripe } = require("stripe");
 
+const createNotification = require("./utils/createNotification");
+
 const serviceAccount = require("./coin-crafter-firebase-admin-key.json");
 
 admin.initializeApp({
@@ -289,7 +291,9 @@ async function run() {
       res.send({ totalCoins });
     });
 
-    // PATCH: Update submission status (approve or reject)
+   
+
+    // PATCH: Approve or Reject Submission Status
     app.patch(
       "/submissions/update-status/:id",
       verifyFBToken(db),
@@ -297,30 +301,120 @@ async function run() {
       async (req, res) => {
         const { id } = req.params;
         const { status } = req.body;
+        const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@microtask.com";
 
-        const submission = await submissionsCollection.findOne({
-          _id: new ObjectId(id),
-        });
-        if (!submission) {
-          return res.status(404).send({ error: "Submission not found" });
+        if (!["approved", "rejected"].includes(status)) {
+          return res.status(400).send({ error: "Invalid status value" });
         }
 
-        const updateResult = await submissionsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { status } }
-        );
+        try {
+          const submission = await submissionsCollection.findOne({
+            _id: new ObjectId(id),
+          });
+          if (!submission)
+            return res.status(404).send({ error: "Submission not found" });
 
-        // If approved, add coins
-        if (status === "approved") {
-          await usersCollection.updateOne(
-            { email: submission.worker_email },
-            { $inc: { coins: submission.payable_amount } }
+          const updateResult = await submissionsCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { status } }
           );
-        }
+          if (updateResult.modifiedCount === 0) {
+            return res
+              .status(500)
+              .send({ error: "Failed to update submission status" });
+          }
 
-        res.send({ success: true, modifiedCount: updateResult.modifiedCount });
+          const task = await tasksCollection.findOne({
+            _id: new ObjectId(submission.task_id),
+          });
+          const buyer = await usersCollection.findOne({
+            email: submission.buyer_email,
+          });
+
+          if (status === "approved") {
+            await usersCollection.updateOne(
+              { email: submission.worker_email },
+              { $inc: { coins: submission.payable_amount } }
+            );
+
+            await db.collection("notifications").insertOne({
+              message: `You have earned $${submission.payable_amount} from ${buyer.name} for completing "${task.title}"`,
+              toEmail: submission.worker_email,
+              actionRoute: "/dashboard/worker-home",
+              time: new Date(),
+            });
+
+            await db.collection("notifications").insertOne({
+              message: `${buyer.name} approved submission (ID: ${submission._id}) for "${task.title}" by ${submission.worker_email}`,
+              toEmail: ADMIN_EMAIL,
+              actionRoute: "/dashboard/admin/submissions",
+              time: new Date(),
+            });
+
+            await db.collection("notifications").insertOne({
+              message: `You have successfully approved the submission for "${task.title}" by ${submission.worker_email}`,
+              toEmail: buyer.email,
+              actionRoute: "/dashboard/buyer-submissions",
+              time: new Date(),
+            });
+          }
+
+          if (status === "rejected") {
+            await db.collection("notifications").insertOne({
+              message: `${buyer.name} rejected your submission for "${task.title}"`,
+              toEmail: submission.worker_email,
+              actionRoute: "/dashboard/worker-home",
+              time: new Date(),
+            });
+
+            await db.collection("notifications").insertOne({
+              message: `${buyer.name} rejected submission (ID: ${submission._id}) for "${task.title}" by ${submission.worker_email}`,
+              toEmail: ADMIN_EMAIL,
+              actionRoute: "/dashboard/admin/submissions",
+              time: new Date(),
+            });
+
+            await db.collection("notifications").insertOne({
+              message: `You have rejected the submission for "${task.title}" by ${submission.worker_email}`,
+              toEmail: buyer.email,
+              actionRoute: "/dashboard/buyer-submissions",
+              time: new Date(),
+            });
+          }
+
+          res.send({
+            success: true,
+            modifiedCount: updateResult.modifiedCount,
+          });
+        } catch (error) {
+          console.error("Error updating submission status:", error);
+          res.status(500).send({ error: "Internal server error" });
+        }
       }
     );
+
+    // Notification
+
+    app.get("/notifications", verifyFBToken(db), async (req, res) => {
+      const email = req.query.email;
+
+      if (!email) {
+        return res.status(400).json({ error: "Email is required" });
+      }
+
+      try {
+        const notifications = await db
+          .collection("notifications")
+          .find({ toEmail: email }) // Make sure this matches your DB field
+          .sort({ time: -1 }) // Sort by newest first
+          .toArray();
+
+        res.status(200).json(notifications);
+      } catch (error) {
+        console.error("Failed to fetch notifications:", error);
+        res.status(500).json({ error: "Internal server error" });
+      }
+    });
 
     // 4. PATCH Reject Submission
     app.patch(
@@ -692,7 +786,7 @@ async function run() {
         res.status(500).json({ message: "Error retrieving task." });
       }
     });
-    
+
 
     // POST submission by worker
     app.post(
@@ -794,6 +888,7 @@ async function run() {
           const result = await withdrawalsCollection.insertOne({
             ...withdrawal,
             status: "pending", // Ensure it's marked as pending
+            requestedAt: new Date(), // store creation time explicitly
           });
 
           res.status(201).send({ insertedId: result.insertedId });
@@ -845,17 +940,20 @@ async function run() {
       }
     );
 
-    // PATCH: Approve Withdrawal
+    
+
     app.patch(
       "/admin/withdrawals/:id/approve",
       verifyFBToken(db),
       verifyAdmin,
       async (req, res) => {
         const { id } = req.params;
+        const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@microtask.com";
 
         const withdrawal = await withdrawalsCollection.findOne({
           _id: new ObjectId(id),
         });
+
         if (!withdrawal)
           return res.status(404).send({ error: "Withdrawal not found" });
 
@@ -865,9 +963,25 @@ async function run() {
         );
 
         const deductCoin = await usersCollection.updateOne(
-          { email: withdrawal.email },
-          { $inc: { coins: -withdrawal.amount } }
+          { email: withdrawal.worker_email },
+          { $inc: { coins: -withdrawal.withdrawal_coin } }
         );
+
+        //  Notify admin
+        await db.collection("notifications").insertOne({
+          message: `Withdrawal of ${withdrawal.withdrawal_coin} coins approved for ${withdrawal.worker_email}`,
+          toEmail: ADMIN_EMAIL,
+          actionRoute: "/dashboard/admin/withdrawals",
+          time: new Date(),
+        });
+
+        //  Optionally notify the worker
+        await db.collection("notifications").insertOne({
+          message: `Your withdrawal request of ${withdrawal.withdrawal_coin} coins has been approved.`,
+          toEmail: withdrawal.worker_email,
+          actionRoute: "/dashboard/worker-home",
+          time: new Date(),
+        });
 
         res.send({ approved: true, updated: updateStatus.modifiedCount > 0 });
       }
