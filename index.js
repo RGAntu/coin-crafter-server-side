@@ -466,7 +466,7 @@ async function run() {
           required_workers,
           payable_amount,
           completion_date,
-          submission_info,
+          submission_details,
           task_image_url,
         } = req.body;
 
@@ -505,7 +505,7 @@ async function run() {
           required_workers,
           payable_amount,
           completion_date: new Date(completion_date),
-          submission_info,
+          submission_details: submission_details,
           task_image_url,
           created_by: req.decoded.email,
           status: "pending",
@@ -540,7 +540,7 @@ async function run() {
 
     // PUT: Update Task
     app.put("/tasks/:id", verifyFBToken(db), verifyBuyer, async (req, res) => {
-      const { task_title, task_detail, submission_info } = req.body;
+      const { task_title, task_detail, submission_details } = req.body;
 
       const result = await db.collection("tasks").updateOne(
         { _id: new ObjectId(req.params.id), created_by: req.decoded.email },
@@ -548,7 +548,7 @@ async function run() {
           $set: {
             task_title,
             task_detail,
-            submission_info,
+            submission_details,
           },
         }
       );
