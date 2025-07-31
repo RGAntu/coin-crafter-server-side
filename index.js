@@ -11,6 +11,8 @@ const createNotification = require("./utils/createNotification");
 
 const serviceAccount = require("./coin-crafter-firebase-admin-key.json");
 
+
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
@@ -130,6 +132,19 @@ async function run() {
 
       next();
     };
+
+    // verifyBuyerOrAdmin 
+    function verifyBuyerOrAdmin(req, res, next) {
+  const role = req.decoded.role;
+  if (role === "buyer" || role === "admin") {
+    return next();
+  } else {
+    return res.status(403).send({
+      message: "Forbidden: Only buyers or admins can perform this action",
+    });
+  }
+}
+
 
     // GET all tasks (Admin Only)
     app.get("/tasks", verifyFBToken(db), async (req, res) => {
@@ -545,7 +560,7 @@ async function run() {
     app.delete(
       "/tasks/:id",
       verifyFBToken(db),
-      verifyBuyer,
+      verifyBuyerOrAdmin,
       async (req, res) => {
         const taskId = req.params.id;
         try {
@@ -583,7 +598,7 @@ async function run() {
               );
           }
 
-          res.send({ deleted: true, refillAmount: refill });
+          res.send({ deletedCount: deleteResult.deletedCount, refillAmount: refill });
         } catch (error) {
           console.error("Error deleting task:", error);
           res.status(500).send({ message: "Internal server error" });
