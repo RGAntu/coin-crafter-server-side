@@ -867,30 +867,31 @@ async function run() {
     );
 
     // GET /submissions/worker?email=worker@example.com
-    app.get(
-      "/submissions/worker",
-      verifyFBToken(db),
-      verifyWorker,
-      async (req, res) => {
-        try {
-          const { email } = req.query;
-          if (!email)
-            return res.status(400).json({ message: "Email is required" });
+    app.get("/submissions/worker", verifyFBToken(db), verifyWorker, async (req, res) => {
+  const { email, page: ps, limit: ls } = req.query;
+  if (!email) return res.status(400).json({ message: "Email is required" });
 
-          const submissions = await client
-            .db("coinCrafterDB")
-            .collection("submissions")
-            .find({ worker_email: email })
-            .sort({ submittedAt: -1 })
-            .toArray();
+  const page = parseInt(ps, 10) || 1;
+  const limit = parseInt(ls, 10) || 10;
+  const skip = (page - 1) * limit;
 
-          res.json(submissions);
-        } catch (err) {
-          console.error("Error fetching submissions:", err);
-          res.status(500).json({ message: "Error fetching submissions" });
-        }
-      }
-    );
+  const total = await submissionsCollection.countDocuments({ worker_email: email });
+  const submissions = await submissionsCollection
+    .find({ worker_email: email })
+    .sort({ submittedAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .toArray();
+
+  res.json({
+    total,
+    currentPage: page,
+    totalPages: Math.ceil(total / limit),
+    pageSize: limit,
+    submissions
+  });
+});
+
 
     app.post(
       "/withdrawals",
