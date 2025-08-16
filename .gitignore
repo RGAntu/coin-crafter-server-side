@@ -1,4 +1,4 @@
 node_modules
 .env
 .vercel
-coin-crafter-firebase-admin-key.jsoncoin-crafter-firebase-admin-key.json
+firebase-adminsdk.json

@@ -9,12 +9,12 @@ const { default: Stripe } = require("stripe");
 
 const createNotification = require("./utils/createNotification");
 
-const serviceAccount = require("./coin-crafter-firebase-admin-key.json");
+const serviceAccount = require("./firebase-adminsdk.json");
 
 
 
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+  credential: admin.credential.cert(serviceAccount)
 });
 
 // Middleware
