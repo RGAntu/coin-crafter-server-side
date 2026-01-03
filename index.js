@@ -693,7 +693,8 @@ async function run() {
           .find({ role: "worker" }) //  Only workers
           .sort({ coins: -1 })
           .limit(6)
-          .project({ name: 1, photo: 1, coins: 1 }) // return only needed fields
+          .project({ name: 1, photo: 1, coins: 1, rating: 1,
+        tasksCompleted: 1}) // return only needed fields
           .toArray();
 
         res.send(topWorkers);
